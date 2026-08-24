@@ -1,16 +1,16 @@
 {
   "name": "tasks-axi",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "packageManager": "pnpm@11.1.1",
   "description": "AXI-compliant task/backlog CLI — token-efficient TOON output, pluggable backends, byte-exact markdown round-trip, idempotent mutations",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kunchenguid/tasks-axi.git"
+    "url": "git+https://github.com/nphattai/tasks-axi.git"
   },
-  "homepage": "https://github.com/kunchenguid/tasks-axi#readme",
+  "homepage": "https://github.com/nphattai/tasks-axi#readme",
   "bugs": {
-    "url": "https://github.com/kunchenguid/tasks-axi/issues"
+    "url": "https://github.com/nphattai/tasks-axi/issues"
   },
   "keywords": [
     "tasks",
