@@ -8,7 +8,7 @@ import {
   showCommand,
   updateCommand,
 } from "../../src/commands/crud.js";
-import { makeBacklog } from "../helpers.js";
+import { makeBacklog, seedEpic } from "../helpers.js";
 
 describe("crud commands", () => {
   describe("add", () => {
@@ -16,13 +16,25 @@ describe("crud commands", () => {
       const b = makeBacklog();
       try {
         const out = await addCommand(
-          ["new-q1", "a fresh task", "--kind", "ship", "--repo", "demo"],
+          [
+            "new-q1",
+            "a fresh task",
+            "--epic",
+            "ops",
+            "--kind",
+            "ship",
+            "--repo",
+            "demo",
+          ],
           b.ctx,
         );
         expect(out).toContain("id: new-q1");
         expect(out).toContain("state: queued");
         expect(out).toContain("Run `tasks-axi start new-q1`");
-        expect(b.read()).toContain("- [ ] new-q1 - a fresh task");
+        // fmops enforce-on-write: engine auto-prepends the epic tag and appends
+        // a parent: <slug> dep edge so orphans are unrepresentable.
+        expect(b.read()).toContain("- [ ] new-q1 - [ops] a fresh task");
+        expect(b.read()).toContain("parent: ops");
       } finally {
         b.cleanup();
       }
@@ -35,6 +47,8 @@ describe("crud commands", () => {
           [
             "new-h1",
             "started task",
+            "--epic",
+            "ops",
             "--kind",
             "ship",
             "--repo",
@@ -64,6 +78,8 @@ describe("crud commands", () => {
           [
             "toon-q1",
             "round trips",
+            "--epic",
+            "ops",
             "--kind",
             "ship",
             "--repo",
@@ -84,7 +100,10 @@ describe("crud commands", () => {
     it("confirms a queued add and suggests start, not done", async () => {
       const b = makeBacklog();
       try {
-        const out = await addCommand(["new-q9", "queued task"], b.ctx);
+        const out = await addCommand(
+          ["new-q9", "queued task", "--epic", "ops"],
+          b.ctx,
+        );
         expect(out).toContain("ok: added new-q9 -> Queued");
         expect(out).toContain("Run `tasks-axi start new-q9`");
         expect(out).not.toContain("Run `tasks-axi done new-q9");
@@ -100,6 +119,8 @@ describe("crud commands", () => {
           [
             "json-q1",
             "json task",
+            "--epic",
+            "ops",
             "--kind",
             "ship",
             "--repo",
@@ -133,7 +154,14 @@ describe("crud commands", () => {
       const b = makeBacklog();
       try {
         const out = await addCommand(
-          ["long-body-q1", "short task", "--body", "x".repeat(600)],
+          [
+            "long-body-q1",
+            "short task",
+            "--epic",
+            "ops",
+            "--body",
+            "x".repeat(600),
+          ],
           b.ctx,
         );
         expect(out).toContain("use show long-body-q1 --full");
@@ -158,7 +186,10 @@ describe("crud commands", () => {
     it("mints an id from the title with --mint", async () => {
       const b = makeBacklog();
       try {
-        const out = await addCommand(["a quick note", "--mint"], b.ctx);
+        const out = await addCommand(
+          ["a quick note", "--mint", "--epic", "ops"],
+          b.ctx,
+        );
         expect(out).toMatch(/id: a-quick-note-[0-9a-f]{2}/);
       } finally {
         b.cleanup();
@@ -195,7 +226,10 @@ describe("crud commands", () => {
     it("is idempotent for an existing id", async () => {
       const b = makeBacklog();
       try {
-        const out = await addCommand(["lease-adopt", "dup title"], b.ctx);
+        const out = await addCommand(
+          ["lease-adopt", "dup title", "--epic", "ops"],
+          b.ctx,
+        );
         expect(out).toContain("already: true");
       } finally {
         b.cleanup();
@@ -338,10 +372,17 @@ describe("crud commands", () => {
       const b = makeBacklog();
       try {
         await addCommand(
-          ["new-q1", "blocked work", "--blocked-by", "lease-core-t4"],
+          [
+            "new-q1",
+            "blocked work",
+            "--epic",
+            "ops",
+            "--blocked-by",
+            "lease-core-t4",
+          ],
           b.ctx,
         );
-        expect(b.read()).toContain("new-q1 - blocked work");
+        expect(b.read()).toContain("new-q1 - [ops] blocked work");
         expect(b.read()).toContain("blocked-by: lease-core-t4");
       } finally {
         b.cleanup();
@@ -382,7 +423,10 @@ describe("crud commands", () => {
     it("persists priority through a fresh read", async () => {
       const b = makeBacklog();
       try {
-        await addCommand(["new-q1", "ranked task", "--priority", "2"], b.ctx);
+        await addCommand(
+          ["new-q1", "ranked task", "--epic", "ops", "--priority", "2"],
+          b.ctx,
+        );
         const out = await showCommand(["new-q1"], b.ctx);
         expect(out).toContain("priority: 2");
         expect(b.read()).toContain("(priority: 2)");
@@ -393,6 +437,141 @@ describe("crud commands", () => {
 
     it("exposes usage help text", () => {
       expect(ADD_HELP).toContain("usage: tasks-axi add");
+    });
+
+    // fmops enforce-on-write: add requires --epic <slug> (or --child-of).
+    // The slug must resolve to an existing epic dir; the title is
+    // idempotently stamped with `[<slug>]` and a `parent: <slug>` dep edge is
+    // appended, so orphan tasks are unrepresentable at creation.
+    describe("--epic enforce-on-write", () => {
+      it("refuses to add without --epic or --child-of", async () => {
+        const b = makeBacklog();
+        try {
+          await expect(
+            addCommand(["orphan-q1", "orphan task"], b.ctx),
+          ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+          expect(b.read()).not.toContain("orphan-q1");
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("refuses to add when the epic slug does not resolve", async () => {
+        const b = makeBacklog();
+        try {
+          await expect(
+            addCommand(
+              ["nope-q1", "unknown epic", "--epic", "nope-not-real"],
+              b.ctx,
+            ),
+          ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+          expect(b.read()).not.toContain("nope-q1");
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("stamps the [<slug>] title tag and parent: <slug> edge", async () => {
+        const b = makeBacklog();
+        try {
+          await addCommand(
+            ["stamped-q1", "work on a thing", "--epic", "ops"],
+            b.ctx,
+          );
+          expect(b.read()).toContain("stamped-q1 - [ops] work on a thing");
+          expect(b.read()).toContain("parent: ops");
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("does not double-stamp a title that already carries the tag", async () => {
+        const b = makeBacklog();
+        try {
+          await addCommand(
+            ["prestamped-q1", "[ops] already tagged", "--epic", "ops"],
+            b.ctx,
+          );
+          expect(b.read()).toContain(
+            "prestamped-q1 - [ops] already tagged",
+          );
+          expect(b.read()).not.toContain("[ops] [ops]");
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("inherits the parent's epic through --child-of", async () => {
+        const b = makeBacklog();
+        try {
+          // First seed a top-level task under `ops`.
+          await addCommand(
+            ["parent-h1", "captain call", "--epic", "ops"],
+            b.ctx,
+          );
+          // Then a child inherits via --child-of.
+          await addCommand(
+            ["parent-h1-decision-q1", "hold pending", "--child-of", "parent-h1"],
+            b.ctx,
+          );
+          expect(b.read()).toContain(
+            "parent-h1-decision-q1 - [ops] hold pending",
+          );
+          expect(b.read()).toContain("parent: parent-h1");
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("refuses --child-of when the parent does not exist", async () => {
+        const b = makeBacklog();
+        try {
+          await expect(
+            addCommand(
+              ["child-q1", "orphan child", "--child-of", "no-such-parent"],
+              b.ctx,
+            ),
+          ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("refuses --epic and --child-of at the same time", async () => {
+        const b = makeBacklog();
+        try {
+          await expect(
+            addCommand(
+              [
+                "both-q1",
+                "conflicting",
+                "--epic",
+                "ops",
+                "--child-of",
+                "lease-adopt",
+              ],
+              b.ctx,
+            ),
+          ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+        } finally {
+          b.cleanup();
+        }
+      });
+
+      it("resolves a second epic by slug when it is seeded on disk", async () => {
+        const b = makeBacklog();
+        try {
+          seedEpic(b.dir, "fmops");
+          await addCommand(
+            ["fmops-q1", "second-epic task", "--epic", "fmops"],
+            b.ctx,
+          );
+          expect(b.read()).toContain("fmops-q1 - [fmops] second-epic task");
+          expect(b.read()).toContain("parent: fmops");
+        } finally {
+          b.cleanup();
+        }
+      });
     });
   });
 
@@ -440,7 +619,10 @@ describe("crud commands", () => {
     it("uses show --full as the list truncation escape hatch", async () => {
       const b = makeBacklog();
       try {
-        await addCommand(["long-title-q1", "x".repeat(100)], b.ctx);
+        await addCommand(
+          ["long-title-q1", "x".repeat(100), "--epic", "ops"],
+          b.ctx,
+        );
         const out = await listCommand([], b.ctx);
         expect(out).toContain("use show long-title-q1 --full");
         expect(out).not.toContain("use --full to see complete text");

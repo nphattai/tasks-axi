@@ -327,6 +327,21 @@ describe("markdown grammar", () => {
       expect(links).toContainEqual({ kind: "report", url: "data/x/report.md" });
     });
 
+    it("derives the fmops native report path shape from prose too", () => {
+      // The widened REPORT_LINK regex accepts both the legacy shape and the
+      // native `data/plans/<epic>/reports/<id>-report.md` shape so an old
+      // hand-authored line carrying the native URL still parses.
+      const links = deriveLinks(
+        "see data/plans/fmops/reports/native-shape-report.md for details",
+      );
+      expect(links).toEqual([
+        {
+          kind: "report",
+          url: "data/plans/fmops/reports/native-shape-report.md",
+        },
+      ]);
+    });
+
     it("derives a Forgejo pulls URL as the single pr link", () => {
       const links = deriveLinks(
         "merged https://forgejo.samesies.gay/eve/orchalycious/pulls/39",
@@ -479,6 +494,85 @@ describe("markdown grammar", () => {
       };
       expect(renderTaskLines(task)).toEqual([
         "- [ ] held-q1 - wait for launch (hold: load clears) (hold-kind: load) (hold-until: 2999-01-01)",
+      ]);
+    });
+
+    // fmops F2b: report links live in a clean out-of-title `(report: <url>)`
+    // tag (rendered by buildProse, parsed back by extractTags), not appended
+    // to the title. Legacy prose-embedded report URLs still parse on untouched
+    // raw lines.
+    it("renders a report link as an out-of-title (report: <url>) tag", () => {
+      const task: Task = {
+        id: "x-q1",
+        title: "shipped it",
+        state: "done",
+        links: [
+          {
+            kind: "report",
+            url: "data/plans/fmops/reports/x-q1-report.md",
+          },
+        ],
+        deps: [],
+        closed: "2026-07-01",
+      };
+      expect(renderTaskLines(task)).toEqual([
+        "- [x] x-q1 - shipped it (reported 2026-07-01) (report: data/plans/fmops/reports/x-q1-report.md)",
+      ]);
+    });
+
+    it("parses an out-of-title (report: <url>) tag back into task.links", () => {
+      const src = [
+        "## Queued",
+        "",
+        "## Done",
+        "- [x] native-report-r1 - shipped it (reported 2026-07-01) (report: data/plans/fmops/reports/native-report-r1-report.md)",
+        "",
+      ].join("\n");
+      const doc = parseBacklog(src);
+      const task = tasksOf(doc).find((t) => t.id === "native-report-r1");
+      expect(task).toBeDefined();
+      expect(task?.title).toBe("shipped it");
+      expect(task?.links).toEqual([
+        {
+          kind: "report",
+          url: "data/plans/fmops/reports/native-report-r1-report.md",
+        },
+      ]);
+      // Byte-exact round-trip on the new form.
+      expect(renderBacklog(doc)).toBe(src);
+    });
+
+    it("round-trips a task with both an out-of-title report and other tags", () => {
+      const src = [
+        "## Queued",
+        "",
+        "## Done",
+        "- [x] tagged-x - work (repo: acme) (report: data/plans/fmops/reports/tagged-x-report.md) (reported 2026-07-01)",
+        "",
+      ].join("\n");
+      const doc = parseBacklog(src);
+      markAllDirty(doc);
+      // The canonical render puts (report: ...) after (repo:) and dates.
+      const canonical = renderBacklog(doc);
+      expect(canonical).toContain(
+        "(repo: acme) (reported 2026-07-01) (report: data/plans/fmops/reports/tagged-x-report.md)",
+      );
+      // Idempotent under a second round-trip.
+      const doc2 = parseBacklog(canonical);
+      markAllDirty(doc2);
+      expect(renderBacklog(doc2)).toBe(canonical);
+    });
+
+    it("deduplicates a URL that appears both in prose and as an out-of-title tag", () => {
+      // A legacy line that has the URL in the prose AND (accidentally) also as
+      // a tag should not double-count on parse; the prose reference wins.
+      const line =
+        "- [x] dup-r1 - shipped data/x/report.md (report: data/x/report.md) (reported 2026-07-01)";
+      const src = ["## Done", line, ""].join("\n");
+      const doc = parseBacklog(src);
+      const task = tasksOf(doc)[0];
+      expect(task.links).toEqual([
+        { kind: "report", url: "data/x/report.md" },
       ]);
     });
 

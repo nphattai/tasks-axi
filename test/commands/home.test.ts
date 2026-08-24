@@ -37,7 +37,10 @@ describe("home", () => {
   it("uses show --full as the dashboard truncation escape hatch", async () => {
     const b = makeBacklog();
     try {
-      await addCommand(["long-title-q1", "x".repeat(100)], b.ctx);
+      await addCommand(
+        ["long-title-q1", "x".repeat(100), "--epic", "ops"],
+        b.ctx,
+      );
       const out = await homeCommand([], b.ctx);
       expect(out).toContain("use show long-title-q1 --full");
       expect(out).not.toContain("use --full to see complete text");

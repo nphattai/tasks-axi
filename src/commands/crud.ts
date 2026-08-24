@@ -14,6 +14,7 @@ import { PR_URL_EXPECTED } from "../pr-url.js";
 import { renderMutation, stateLabel, taskToJson } from "../confirm.js";
 import { requireCtx, type TasksContext } from "../context.js";
 import { blockedIds, heldTasks } from "../derive.js";
+import { epicOfTask, resolveEpicDir, validateEpicSlug } from "../epic-paths.js";
 import { AxiError, notFound } from "../errors.js";
 import { parseFields } from "../fields.js";
 import { formatCountLine } from "../format.js";
@@ -43,18 +44,24 @@ import {
   showFullTextHint,
 } from "../view.js";
 
-export const ADD_HELP = `usage: tasks-axi add <id> "<title>" [flags]
+export const ADD_HELP = `usage: tasks-axi add <id> "<title>" --epic <slug> [flags]
 aliases: create
+Epic membership is enforced on write: pass --epic <slug> (the slug must resolve
+to an existing data/plans/*-epic-<slug>/epic.md), or use --child-of <parent-id>
+to inherit the parent's epic. The engine auto-stamps [<slug>] on the title and
+a parent: <slug> dep edge, idempotently.
 flags:
+  --epic <slug>        required (unless --child-of); the epic the task belongs to
+  --child-of <id>      escape: inherit the epic from an existing parent task
   --kind <ship|scout|docs|...>, --repo <name>, --body <text> or --body-file <path>
   --start (place in In flight) | --queue (place in Queued, default)
   --blocked-by <id> (repeatable, must exist), --pr <url>, --report <path>, --priority <0-4>
   --mint [--prefix <p>]   mint a slug-xx id from the title instead of passing one
   --json   print the resulting task as a JSON object
 examples:
-  tasks-axi add lavish-foo-q9 "fix summary toggle" --kind ship --repo lavish-axi --start
-  tasks-axi add fm-x "adopt lease" --blocked-by treehouse-lease-t4
-  tasks-axi add "quick note" --mint`;
+  tasks-axi add lavish-foo-q9 "fix summary toggle" --epic fmops --kind ship --repo lavish-axi --start
+  tasks-axi add fm-x-decision-q1 "captain call" --child-of fm-x
+  tasks-axi add "quick note" --epic ops --mint`;
 
 export const LIST_HELP = `usage: tasks-axi list [flags]
 flags:
@@ -147,7 +154,9 @@ function requireTypedLinkUrl(
     !deriveLinks(url).some((link) => link.kind === kind && link.url === url)
   ) {
     const expected =
-      kind === "pr" ? PR_URL_EXPECTED : "a data/<id>/report.md path";
+      kind === "pr"
+        ? PR_URL_EXPECTED
+        : "a data/<id>/report.md or data/plans/<epic>/reports/<id>-report.md path";
     throw new AxiError(`${flag} must be ${expected}`, "VALIDATION_ERROR");
   }
   return url;
@@ -205,6 +214,84 @@ function requireTitle(
   return title;
 }
 
+const EPIC_TITLE_TAG_RE = /^\[([a-z][a-z0-9-]*)\]\s+/;
+
+/**
+ * Resolve the epic slug an `add` invocation is stamping onto the new task.
+ *
+ * `--epic <slug>` validates the slug shape and asserts a
+ * `data/plans/*-epic-<slug>/epic.md` exists so the created task can never be
+ * orphan. `--child-of <parent-id>` reads the parent task, inherits its epic
+ * via `epicOfTask`, and refuses the create if the parent itself is orphan.
+ *
+ * Throws EPIC_REQUIRED when neither flag is passed; EPIC_NOT_FOUND when the
+ * slug does not resolve; and a structured error naming the parent when
+ * `--child-of` points at a task with no derivable epic.
+ */
+async function resolveEffectiveEpic(opts: {
+  store: Store;
+  backlogPath: string;
+  epicFlag: string | undefined;
+  childOfId: string | undefined;
+  childId: string;
+}): Promise<string> {
+  if (opts.epicFlag !== undefined) {
+    const slug = validateEpicSlug(opts.epicFlag);
+    // Throws EPIC_NOT_FOUND when the epic dir isn't on disk yet.
+    resolveEpicDir(slug, { backlogPath: opts.backlogPath });
+    return slug;
+  }
+  if (opts.childOfId !== undefined) {
+    if (opts.childOfId === opts.childId) {
+      throw new AxiError(
+        "A task cannot be a child of itself",
+        "VALIDATION_ERROR",
+      );
+    }
+    const parent = await opts.store.get(opts.childOfId);
+    if (!parent) {
+      throw new AxiError(
+        `--child-of parent "${opts.childOfId}" not found`,
+        "VALIDATION_ERROR",
+        [
+          "Create the parent task first, or pass --epic <slug> for a top-level task",
+        ],
+      );
+    }
+    const inherited = epicOfTask(parent);
+    if (inherited === null) {
+      throw new AxiError(
+        `--child-of parent "${opts.childOfId}" has no derivable epic`,
+        "VALIDATION_ERROR",
+        [`Attach the parent to an epic first, or pass --epic <slug> here`],
+      );
+    }
+    // Sanity: the inherited slug must still resolve on disk (the parent
+    // predates enforce-on-write when its epic dir has since moved).
+    resolveEpicDir(inherited, { backlogPath: opts.backlogPath });
+    return inherited;
+  }
+  throw new AxiError(
+    "Missing --epic <slug> (or --child-of <parent-id>)",
+    "VALIDATION_ERROR",
+    [
+      "Every task belongs to an epic. Pass --epic <slug> where slug names a data/plans/*-epic-<slug>/epic.md",
+      "Or use --child-of <parent-id> to inherit the epic from an existing task",
+    ],
+  );
+}
+
+/**
+ * Idempotently prepend `[<slug>]` to a title. Leaves any existing `[<any>]`
+ * prefix alone (so a caller-supplied `[<slug>] title` is not double-stamped,
+ * and a divergent tag is preserved rather than silently rewritten — `doctor`
+ * flags divergence).
+ */
+function stampEpicTitle(title: string, slug: string): string {
+  if (EPIC_TITLE_TAG_RE.test(title)) return title;
+  return `[${slug}] ${title}`;
+}
+
 async function mintAvailableId(
   store: Store,
   title: string,
@@ -228,7 +315,7 @@ export async function addCommand(
   rawArgs: string[],
   context?: TasksContext,
 ): Promise<string> {
-  const { store } = requireCtx(context);
+  const { store, config } = requireCtx(context);
   const args = [...rawArgs];
 
   const kind = requireSafeTagFlagValue("--kind", takeFlag(args, "--kind"));
@@ -244,6 +331,14 @@ export async function addCommand(
   const mint = takeBoolFlag(args, "--mint");
   const rawPrefix = takeFlag(args, "--prefix");
   const titleFlag = takeFlag(args, "--title");
+  const epicFlag = requireNonEmptySingleLineFlagValue(
+    "--epic",
+    takeFlag(args, "--epic"),
+  );
+  const childOfFlag = requireNonEmptySingleLineFlagValue(
+    "--child-of",
+    takeFlag(args, "--child-of"),
+  );
 
   if (start && queue) {
     throw new AxiError(
@@ -256,6 +351,15 @@ export async function addCommand(
       "--prefix can only be used with --mint",
       "VALIDATION_ERROR",
       ['Run `tasks-axi add "<title>" --mint --prefix <p>`, or omit --prefix'],
+    );
+  }
+  if (epicFlag !== undefined && childOfFlag !== undefined) {
+    throw new AxiError(
+      "Use only one of --epic or --child-of",
+      "VALIDATION_ERROR",
+      [
+        "Pass --epic <slug> for a top-level task, or --child-of <parent-id> to inherit membership",
+      ],
     );
   }
   const prefix = requireNonEmptySingleLineFlagValue("--prefix", rawPrefix);
@@ -284,11 +388,31 @@ export async function addCommand(
     );
   }
 
+  // Resolve the effective epic slug (fmops enforce-on-write: an orphan task is
+  // unrepresentable at creation). `--epic` names the slug directly; `--child-of`
+  // inherits the parent's epic via `epicOfTask`.
+  const epicSlug = await resolveEffectiveEpic({
+    store,
+    backlogPath: config.path,
+    epicFlag,
+    childOfId: childOfFlag,
+    childId: id,
+  });
+
   if (deps.some((dep) => dep.id === id)) {
     throw new AxiError("A task cannot block itself", "VALIDATION_ERROR");
   }
   await requireExistingBlockers(store, deps);
   const links = parseLinks(pr, report);
+
+  // Idempotent stamping: prepend `[<slug>]` to the title if it isn't already
+  // tagged, and append a `parent: <slug|parent-id>` edge if there is no
+  // parent: edge yet. Never double-stamps.
+  title = stampEpicTitle(title, epicSlug);
+  const parentTarget = childOfFlag ?? epicSlug;
+  if (parentTarget !== undefined && !deps.some((d) => d.type === "parent")) {
+    deps.push({ type: "parent", id: parentTarget });
+  }
 
   if (!mint) {
     const existing = await store.get(id);

@@ -125,8 +125,20 @@ const TAIL_HOLD_KIND = new RegExp(
   `\\s*\\(hold-kind:\\s*(${HOLD_KINDS.join("|")})\\)\\s*$`,
 );
 const TAIL_HOLD_UNTIL = new RegExp(`\\s*\\(hold-until:\\s*(${DATE})\\)\\s*$`);
+// F2b: `--report <url>` stores its URL as a clean out-of-title tag instead of
+// polluting the title. The URL must be a single token (no whitespace, no `(`
+// or `)`); legacy report-in-title lines still parse via REPORT_LINK on prose.
+const TAIL_REPORT = /\s*\(report:\s*([^()\s]+)\)\s*$/;
 
-const REPORT_LINK = /\bdata\/\S+?\/report\.md\b/g;
+/**
+ * Matches BOTH the legacy prose-embedded shape `data/<id>/report.md` AND the
+ * native fmops shape `data/plans/<epic>/reports/<id>-report.md`. Legacy prose
+ * URLs on untouched raw lines still parse (backward compat); new writes go
+ * through the out-of-title `(report: <url>)` tag instead of the title so the
+ * title never carries a URL.
+ */
+const REPORT_LINK =
+  /\bdata\/(?:plans\/[^\s/()]+\/reports\/[^\s/()]+-report\.md|\S+?\/report\.md)\b/g;
 const GENERIC_URL = /https?:\/\/\S+/g;
 
 const LEADING_KIND: Array<[RegExp, string]> = [
@@ -200,6 +212,7 @@ export function extractTags(rest: string): ExtractedTags {
   let holdReason: string | undefined;
   let holdKind: HoldKind | undefined;
   let holdUntil: string | undefined;
+  const reportTags: string[] = [];
 
   let title = rest;
   let stripping = true;
@@ -271,11 +284,31 @@ export function extractTags(rest: string): ExtractedTags {
       stripping = true;
       continue;
     }
+    m = title.match(TAIL_REPORT);
+    if (m) {
+      // Preserve source order when multiple tags appear (rare, mostly a
+      // rendered form so appearance order matches insertion order).
+      reportTags.unshift(m[1]);
+      title = title.slice(0, m.index);
+      stripping = true;
+      continue;
+    }
   }
 
   title = title.trim();
   const kind = kindTag ?? leadingKind(title);
-  const links = deriveLinks(title);
+  // Merge prose-derived links (pr/legacy-report/doc) with the out-of-title
+  // `(report: <url>)` tag values. A URL that appears in both wins from the
+  // prose side; dedup by url so a rendered task never claims the same report
+  // link twice.
+  const proseLinks = deriveLinks(title);
+  const seen = new Set(proseLinks.map((link) => link.url));
+  const links: TaskLink[] = [...proseLinks];
+  for (const url of reportTags) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    links.push({ kind: "report", url });
+  }
   const hold =
     holdReason !== undefined
       ? {
@@ -322,6 +355,16 @@ export function buildProse(task: Task): string {
     parts.push(`(hold: ${task.hold.reason})`);
     if (task.hold.kind) parts.push(`(hold-kind: ${task.hold.kind})`);
     if (task.hold.until) parts.push(`(hold-until: ${task.hold.until})`);
+  }
+  // F2b: emit report links as out-of-title `(report: <url>)` tags for every
+  // report url in task.links that is not already present in the title prose
+  // (a legacy prose-embedded URL renders itself; the tag stays reserved for
+  // links tasks-axi stored cleanly through --report).
+  const proseUrls = new Set(deriveLinks(task.title).map((link) => link.url));
+  for (const link of task.links) {
+    if (link.kind !== "report") continue;
+    if (proseUrls.has(link.url)) continue;
+    parts.push(`(report: ${link.url})`);
   }
   // A reason runs as free text to the end of the line, so an edge that has one
   // is emitted after the parenthetical tags - both to match firstmate's real
