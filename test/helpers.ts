@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MarkdownStore } from "../src/backends/markdown.js";
@@ -44,6 +50,29 @@ export interface TempBacklog {
   cleanup(): void;
 }
 
+/**
+ * Default epic slug the test backlog is seeded under. Tests that exercise the
+ * `add --epic` enforce-on-write path can pass this without seeding their own
+ * epic dir; every `makeBacklog()` call seeds this epic at
+ * `<dir>/plans/260824-epic-<slug>/epic.md` automatically.
+ */
+export const DEFAULT_TEST_EPIC = "ops";
+
+/**
+ * Seed an epic frontmatter file at the fmops-native location under a data
+ * root. Used by `makeBacklog` and by any test that wants a second epic.
+ */
+export function seedEpic(dataRoot: string, slug: string): string {
+  const epicDir = join(dataRoot, "plans", `260824-epic-${slug}`);
+  mkdirSync(epicDir, { recursive: true });
+  writeFileSync(
+    join(epicDir, "epic.md"),
+    ["---", `epic: ${slug}`, "title: Test epic", "---", "", "body"].join("\n"),
+    "utf-8",
+  );
+  return epicDir;
+}
+
 /** Create a temp backlog file + a real markdown-backed context with a fixed clock. */
 export function makeBacklog(
   content = FIXTURE,
@@ -52,6 +81,11 @@ export function makeBacklog(
   const dir = mkdtempSync(join(tmpdir(), "tasks-axi-"));
   const path = join(dir, "backlog.md");
   writeFileSync(path, content, "utf8");
+  // The engine's enforce-on-write path (`add --epic <slug>`) resolves the
+  // slug against `<dataRoot>/plans/*-epic-<slug>/epic.md`, where dataRoot ==
+  // dirname(backlog.path). Seeding a default epic here lets every add test
+  // pass `--epic ops` without re-seeding per case.
+  seedEpic(dir, DEFAULT_TEST_EPIC);
   const store = new MarkdownStore({ path, now: () => now });
   const ctx: TasksContext = {
     store,

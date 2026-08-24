@@ -42,6 +42,11 @@ import {
   pruneCommand,
   renderCommand,
 } from "./commands/maintain.js";
+import { DOCTOR_HELP, doctorCommand } from "./commands/doctor.js";
+import { EPIC_HELP, epicCommand } from "./commands/epic.js";
+import { MIGRATE_HELP, migrateCommand } from "./commands/migrate.js";
+import { REPORT_HELP, reportCommand } from "./commands/report.js";
+import { STORY_HELP, storyCommand } from "./commands/story.js";
 import { homeCommand } from "./commands/home.js";
 import {
   PUBLIC_FOLLOWUP_HELP,
@@ -63,13 +68,20 @@ type MainOptions = {
 };
 
 export const TOP_HELP = `usage: tasks-axi [command] [args] [flags]
-commands[19]:
-  (none)=dashboard, add, list, show, start, done, reopen, update, rm, block, unblock, hold, unhold, ready, public-followup, mv, prune, render, setup
+commands[24]:
+  (none)=dashboard, add, list, show, start, done, reopen, update, rm, block, unblock, hold, unhold, ready, public-followup, mv, prune, render, setup, epic, story, report, doctor, migrate
 flags[4]:
   --backend <name> (after command), --file <path> (after command), --json (mutations: machine-readable result), --help, -v/-V/--version
+fmops native (enforce-on-write):
+  tasks-axi add <id> "<title>" --epic <slug>     required; --child-of <parent-id> as escape
+  tasks-axi epic new|list|show                    epic frontmatter + rollup
+  tasks-axi story new|list --epic <slug>          story frontmatter (no status:)
+  tasks-axi report path <id>                      native path: data/plans/<epic>/reports/<id>-report.md
+  tasks-axi doctor                                integrity net (orphan / dangling / missing-report)
+  tasks-axi migrate [--dry-run]                   idempotent transforms for a per-home ops run
 examples:
   tasks-axi
-  tasks-axi add homemux-h7 "owns HomeMux end to end" --kind secondmate --start
+  tasks-axi add homemux-h7 "owns HomeMux end to end" --epic fmops --kind secondmate --start
   tasks-axi list --state queued
   tasks-axi show homemux-h7 --full
   tasks-axi done sm-idle-handoff-q8 --pr https://github.com/o/r/pull/42
@@ -107,6 +119,12 @@ const COMMANDS: Record<string, CommandFn> = {
   prune: withContext(pruneCommand),
   render: withContext(renderCommand),
   setup: (args) => setupCommand(args),
+  // fmops-native first-class verbs.
+  epic: withContext(epicCommand),
+  story: withContext(storyCommand),
+  report: withContext(reportCommand),
+  doctor: withContext(doctorCommand),
+  migrate: withContext(migrateCommand),
 };
 
 const COMMAND_HELP: Record<string, string> = {
@@ -133,6 +151,11 @@ const COMMAND_HELP: Record<string, string> = {
   prune: PRUNE_HELP,
   render: RENDER_HELP,
   setup: SETUP_HELP,
+  epic: EPIC_HELP,
+  story: STORY_HELP,
+  report: REPORT_HELP,
+  doctor: DOCTOR_HELP,
+  migrate: MIGRATE_HELP,
 };
 
 export async function main(options: MainOptions = {}): Promise<void> {
