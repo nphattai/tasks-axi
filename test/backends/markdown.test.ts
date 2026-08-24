@@ -757,6 +757,54 @@ describe("MarkdownStore", () => {
       }
     });
 
+    // fmops F2b: --report stores the URL in a clean out-of-title `(report:
+    // <url>)` tag, not appended to the title.
+    it("moves to done with a native report link stored out-of-title", async () => {
+      const b = makeBacklog();
+      try {
+        const nativePath =
+          "data/plans/fmops/reports/cert-cleanup-report.md";
+        const task = await b.store.transition("cert-cleanup", "done", {
+          report: nativePath,
+        });
+        expect(task.state).toBe("done");
+        expect(task.closed).toBe("2026-07-01");
+        // The URL is NOT in the title
+        expect(task.title).not.toContain(nativePath);
+        // It IS in task.links
+        expect(task.links).toContainEqual({
+          kind: "report",
+          url: nativePath,
+        });
+        // And it renders as a clean out-of-title tag on disk
+        const read = b.read();
+        expect(read).toContain(`(report: ${nativePath})`);
+        expect(read).toContain("(reported 2026-07-01)");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("survives a parse round-trip on the out-of-title report tag", async () => {
+      const b = makeBacklog();
+      try {
+        const nativePath =
+          "data/plans/fmops/reports/cert-cleanup-report.md";
+        await b.store.transition("cert-cleanup", "done", {
+          report: nativePath,
+        });
+        // Reopen through a fresh store instance to force a re-parse from disk.
+        const reloaded = await b.store.get("cert-cleanup");
+        expect(reloaded?.links).toContainEqual({
+          kind: "report",
+          url: nativePath,
+        });
+        expect(reloaded?.title).not.toContain(nativePath);
+      } finally {
+        b.cleanup();
+      }
+    });
+
     it("records a shorter transition link when a longer one already exists", async () => {
       const b = makeBacklog(
         "# Backlog\n\n## Queued\n- [ ] task-q1 - title https://github.com/o/r/pull/10\n\n## Done\n",

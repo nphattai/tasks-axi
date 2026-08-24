@@ -154,7 +154,7 @@ function normalizeTypedLink(link: TaskLink): TaskLink {
       link.kind === "pr"
         ? PR_URL_EXPECTED
         : link.kind === "report"
-          ? "a data/<id>/report.md path"
+          ? "a data/<id>/report.md or data/plans/<epic>/reports/<id>-report.md path"
           : "an http(s) URL";
     throw new AxiError(
       `Task ${link.kind} link must be ${expected}`,
@@ -162,6 +162,34 @@ function normalizeTypedLink(link: TaskLink): TaskLink {
     );
   }
   return { kind: link.kind, url };
+}
+
+/**
+ * Recompute `task.links` after a title/link mutation. Non-report links live in
+ * the prose (pr and doc URLs are appended to the title, deriveLinks reads them
+ * back). Report links live in a clean out-of-title `(report: <url>)` tag so
+ * the title stays free of URLs (fmops F2b). This composer preserves any
+ * out-of-title report link the task already carries and folds in new ones,
+ * deduped by URL against the prose and each other.
+ */
+function refreshLinks(
+  existing: readonly TaskLink[],
+  title: string,
+  added: readonly TaskLink[] = [],
+): TaskLink[] {
+  const proseLinks = deriveLinks(title);
+  const proseUrls = new Set(proseLinks.map((link) => link.url));
+  const outOfTitle = new Map<string, TaskLink>();
+  for (const link of existing) {
+    if (link.kind !== "report" || proseUrls.has(link.url)) continue;
+    outOfTitle.set(link.url, { kind: "report", url: link.url });
+  }
+  for (const link of added) {
+    if (link.kind !== "report") continue;
+    if (proseUrls.has(link.url) || outOfTitle.has(link.url)) continue;
+    outOfTitle.set(link.url, { kind: "report", url: link.url });
+  }
+  return [...proseLinks, ...outOfTitle.values()];
 }
 
 function normalizePriority(priority: number | undefined): number | undefined {
@@ -386,9 +414,13 @@ export class MarkdownStore implements Store {
 
   private requireExistingDeps(doc: BacklogDoc, deps: Dep[]): void {
     for (const dep of deps) {
+      // `parent:` edges name epic membership (fmops) or an external parent
+      // task in another backlog; `discovered-from:` names a prior task that
+      // may have been archived. Neither is required to live in this backlog,
+      // so only `blocked-by:` (the real dispatch-blocking edge) is verified.
+      if (dep.type !== "blocked-by") continue;
       if (this.findEntry(doc, dep.id)) continue;
-      const label = dep.type === "blocked-by" ? "blocker" : "dependency";
-      throw new AxiError(`${label} "${dep.id}" not found`, "VALIDATION_ERROR", [
+      throw new AxiError(`blocker "${dep.id}" not found`, "VALIDATION_ERROR", [
         "Create the dependency task first, or choose an existing task id",
       ]);
     }
@@ -530,15 +562,21 @@ export class MarkdownStore implements Store {
     let title = normalizeTitle(input.title);
     const kind = normalizeTagValue(input.kind, "kind");
     const repo = normalizeTagValue(input.repo, "repo");
-    // Links live in the prose; fold any provided links into the title text.
+    // Non-report links live in the prose (pr/doc URLs append to the title);
+    // report links stay out-of-title and land as a `(report: <url>)` tag.
+    const reportLinksToAdd: TaskLink[] = [];
     for (const link of input.links ?? []) {
-      title = appendTitleLink(title, link);
+      if (link.kind === "report") {
+        reportLinksToAdd.push(normalizeTypedLink(link));
+      } else {
+        title = appendTitleLink(title, link);
+      }
     }
     const task: Task = {
       id,
       title,
       state,
-      links: deriveLinks(title),
+      links: refreshLinks([], title, reportLinksToAdd),
       deps: input.deps ? input.deps.map((dep) => normalizeDep(id, dep)) : [],
     };
     if (kind) task.kind = kind;
@@ -748,16 +786,35 @@ export class MarkdownStore implements Store {
           markChanged("meta");
         }
       }
+      const reportLinksToAdd: TaskLink[] = [];
       for (const link of patch.addLinks ?? []) {
+        if (link.kind === "report") {
+          reportLinksToAdd.push(normalizeTypedLink(link));
+          continue;
+        }
         const title = appendTitleLink(task.title, link);
         if (task.title !== title) {
           task.title = title;
           markChanged("links");
         }
       }
+      if (reportLinksToAdd.length > 0) {
+        const existingReportUrls = new Set(
+          task.links.filter((l) => l.kind === "report").map((l) => l.url),
+        );
+        const proseReportUrls = new Set(
+          deriveLinks(task.title)
+            .filter((l) => l.kind === "report")
+            .map((l) => l.url),
+        );
+        const newReports = reportLinksToAdd.filter(
+          (l) => !existingReportUrls.has(l.url) && !proseReportUrls.has(l.url),
+        );
+        if (newReports.length > 0) markChanged("links");
+      }
       if (changed.length === 0) return { task, changed };
 
-      task.links = deriveLinks(task.title);
+      task.links = refreshLinks(task.links, task.title, reportLinksToAdd);
       task.updated = this.now();
       found.entry.dirty = true;
       let archiveRestorePoint: ArchiveRestorePoint | undefined;
@@ -985,13 +1042,18 @@ export class MarkdownStore implements Store {
       if (opts.report !== undefined) {
         transitionLinks.push({ kind: "report", url: opts.report });
       }
+      const reportLinksToAdd: TaskLink[] = [];
       for (const link of transitionLinks) {
-        task.title = appendTitleLink(task.title, link);
+        if (link.kind === "report") {
+          reportLinksToAdd.push(normalizeTypedLink(link));
+        } else {
+          task.title = appendTitleLink(task.title, link);
+        }
       }
       if (opts.note) {
         task.body = task.body ? `${task.body}\n${opts.note}` : opts.note;
       }
-      task.links = deriveLinks(task.title);
+      task.links = refreshLinks(task.links, task.title, reportLinksToAdd);
 
       task.state = to;
       if (to === "done") {
